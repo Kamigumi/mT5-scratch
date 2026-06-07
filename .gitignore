@@ -1,0 +1,7 @@
+﻿.venv/
+__pycache__/
+*.pyc
+data/*.txt
+checkpoints/
+tokenizer/spm.model
+tokenizer/spm.vocab

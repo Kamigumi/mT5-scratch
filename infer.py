@@ -27,6 +27,9 @@ from data.collator import SpanCorruptionCollator
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokenizer", default="tokenizer/spm.model")
+    ap.add_argument("--profile", default="tiny",
+                    choices=["tiny", "small", "base"],
+                    help="MUST match the profile the checkpoint was trained with")
     ap.add_argument("--checkpoint", default=None,
                     help="optional .pt file with model state_dict")
     ap.add_argument("--text", default="Ang kape ay sikat na inumin sa buong "
@@ -37,7 +40,7 @@ def main():
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    cfg = MT5Config.tiny()
+    cfg = getattr(MT5Config, args.profile)()
     model = build_model(cfg).to(device)
 
     if args.checkpoint:

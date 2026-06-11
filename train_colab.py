@@ -106,6 +106,59 @@ def latest_ckpt(ckpt_dir):
         os.path.basename(f).replace("step", "").replace(".pt", "")))
 
 
+# ---------------- validation ----------------
+def load_val_set(tl_paths, en_paths, n_per_lang=300, min_chars=40, seed=1234):
+    """Load a FIXED held-out set: the first n_per_lang usable lines from each
+    language. Seeded and deterministic so every eval sees the same text.
+
+    IMPORTANT: this reads from the SAME files training streams from. The streams
+    shuffle and cycle the whole files, so there's overlap in principle -- this is
+    a lightweight proxy for held-out loss, not a clean split. For a rigorous
+    split you'd hold these specific lines OUT of training; see the note in the
+    eval print. For our purpose (is loss still improving?) the proxy is fine
+    because the val corruption is fixed and the set is tiny relative to the
+    corpus, so it tracks generalization closely enough to read the trend.
+    """
+    val = []
+    for paths, lang in [(tl_paths, "tl"), (en_paths, "en")]:
+        count = 0
+        for p in paths:
+            if count >= n_per_lang:
+                break
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) >= min_chars:
+                        val.append(line)
+                        count += 1
+                        if count >= n_per_lang:
+                            break
+    return val
+
+
+@torch.no_grad()
+def evaluate(model, val_texts, val_collator, device, use_bf16, batch_size=32):
+    """Mean loss over the held-out set. Uses a FIXED-seed collator so the span
+    corruption is identical every call -- otherwise loss would wobble from
+    random masking rather than real model change."""
+    model.eval()
+    total, n = 0.0, 0
+    for i in range(0, len(val_texts), batch_size):
+        chunk = val_texts[i:i + batch_size]
+        batch = val_collator(chunk)
+        input_ids = batch["input_ids"].to(device)
+        labels = batch["labels"].to(device)
+        if use_bf16:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                _, loss = model(input_ids, labels=labels)
+        else:
+            _, loss = model(input_ids, labels=labels)
+        total += loss.item() * len(chunk)
+        n += len(chunk)
+    model.train()
+    return total / max(1, n)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True, help="Drive project root")
@@ -118,6 +171,7 @@ def main():
     ap.add_argument("--tl_ratio", type=float, default=0.7)
     ap.add_argument("--save_every", type=int, default=1000)
     ap.add_argument("--log_every", type=int, default=50)
+    ap.add_argument("--eval_every", type=int, default=1000)
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -161,6 +215,18 @@ def main():
         tl_ratio=args.tl_ratio,
     )
 
+    # Held-out validation set + a FIXED-seed collator (identical corruption each eval).
+    val_texts = load_val_set(
+        tl_paths=[os.path.join(data_dir, "wikitext_tl.txt"),
+                  os.path.join(data_dir, "mc4_tl.txt")],
+        en_paths=[os.path.join(data_dir, "wikitext_en.txt"),
+                  os.path.join(data_dir, "mc4_en.txt")],
+    )
+    val_collator = SpanCorruptionCollator(
+        tok_path, cfg, max_input_length=args.max_input_length, seed=999
+    )
+    print(f"val set: {len(val_texts)} lines")
+
     model.train()
     running = 0.0
     for step in range(start_step + 1, args.steps + 1):
@@ -187,6 +253,11 @@ def main():
             print(f"step {step:6d} | loss {running/args.log_every:.4f} "
                   f"| lr {lr_at(step):.2e}")
             running = 0.0
+
+        if step % args.eval_every == 0:
+            val_loss = evaluate(model, val_texts, val_collator, device,
+                                use_bf16, batch_size=args.batch_size)
+            print(f"  >> VAL step {step:6d} | val_loss {val_loss:.4f}")
 
         if step % args.save_every == 0:
             path = os.path.join(ckpt_dir, f"step{step}.pt")

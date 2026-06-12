@@ -172,6 +172,10 @@ def main():
     ap.add_argument("--save_every", type=int, default=1000)
     ap.add_argument("--log_every", type=int, default=50)
     ap.add_argument("--eval_every", type=int, default=1000)
+    ap.add_argument("--tokenizer_name", default="spm_v2.model",
+                    help="tokenizer file under <project>/tokenizer/")
+    ap.add_argument("--ckpt_subdir", default="checkpoints",
+                    help="subfolder under <project> for this run's checkpoints")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -179,8 +183,8 @@ def main():
     print(f"device: {device} | bf16: {use_bf16}")
 
     data_dir = os.path.join(args.project, "data")
-    ckpt_dir = os.path.join(args.project, "checkpoints")
-    tok_path = os.path.join(args.project, "tokenizer", "spm.model")
+    ckpt_dir = os.path.join(args.project, args.ckpt_subdir)
+    tok_path = os.path.join(args.project, "tokenizer", args.tokenizer_name)
     os.makedirs(ckpt_dir, exist_ok=True)
 
     cfg = getattr(MT5Config, args.profile)()

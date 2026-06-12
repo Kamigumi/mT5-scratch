@@ -90,14 +90,18 @@ def main():
     ap.add_argument("--val_size", type=int, default=120,
                     help="held-out pairs (gold stage only)")
     ap.add_argument("--log_every", type=int, default=50)
+    ap.add_argument("--tokenizer_name", default="spm_v2.model",
+                    help="tokenizer file under <project>/tokenizer/")
+    ap.add_argument("--out_subdir", default="finetune",
+                    help="subfolder under <project> for fine-tuned checkpoints")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_bf16 = device == "cuda" and torch.cuda.is_bf16_supported()
     print(f"device: {device} | bf16: {use_bf16} | stage: {args.stage}")
 
-    tok_path = os.path.join(args.project, "tokenizer", "spm.model")
-    out_dir = os.path.join(args.project, "finetune")
+    tok_path = os.path.join(args.project, "tokenizer", args.tokenizer_name)
+    out_dir = os.path.join(args.project, args.out_subdir)
     os.makedirs(out_dir, exist_ok=True)
 
     cfg = getattr(MT5Config, args.profile)()

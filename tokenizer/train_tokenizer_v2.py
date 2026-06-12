@@ -60,7 +60,7 @@ def train(input_path, model_prefix, vocab_size=32000,
         # --- practical knobs ---
         input_sentence_size=input_sentence_size,
         shuffle_input_sentence=True,
-        normalization_rule_name="nmt_nfkc_cf",
+        normalization_rule_name="nmt_nfkc",  # case-PRESERVING (no _cf casefold)
         # With byte_fallback, we want the model to also keep frequent whole
         # symbols; max_sentencepiece_length default is fine.
     )

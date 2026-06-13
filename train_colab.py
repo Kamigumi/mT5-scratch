@@ -164,7 +164,10 @@ def main():
     ap.add_argument("--project", required=True, help="Drive project root")
     ap.add_argument("--profile", default="small", choices=["tiny", "small", "base"])
     ap.add_argument("--steps", type=int, default=50_000)
-    ap.add_argument("--batch_size", type=int, default=32)
+    ap.add_argument("--batch_size", type=int, default=32,
+                    help="MICRO-batch per step (memory-bound)")
+    ap.add_argument("--accum_steps", type=int, default=1,
+                    help="gradient accumulation: effective batch = batch_size * accum_steps")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--warmup", type=int, default=1000)
     ap.add_argument("--max_input_length", type=int, default=256)
@@ -172,6 +175,8 @@ def main():
     ap.add_argument("--save_every", type=int, default=1000)
     ap.add_argument("--log_every", type=int, default=50)
     ap.add_argument("--eval_every", type=int, default=1000)
+    ap.add_argument("--min_lr_frac", type=float, default=0.1,
+                    help="floor for cosine decay, as fraction of peak lr")
     ap.add_argument("--tokenizer_name", default="spm_v2.model",
                     help="tokenizer file under <project>/tokenizer/")
     ap.add_argument("--ckpt_subdir", default="checkpoints",
@@ -195,11 +200,17 @@ def main():
                                       max_input_length=args.max_input_length)
     optim = AdamW(model.parameters(), lr=args.lr)
 
-    # Linear warmup then inverse-sqrt decay (T5-ish schedule).
+    # Warmup then COSINE decay to a floor (min_lr_frac * lr). Cosine is smoother
+    # and more standard for long runs than inverse-sqrt, and the floor keeps the
+    # model learning rather than decaying to ~0 too early.
+    import math as _math
     def lr_at(step):
         if step < args.warmup:
             return args.lr * step / max(1, args.warmup)
-        return args.lr * (args.warmup ** 0.5) / (step ** 0.5)
+        progress = (step - args.warmup) / max(1, args.steps - args.warmup)
+        progress = min(1.0, progress)
+        cosine = 0.5 * (1.0 + _math.cos(_math.pi * progress))
+        return args.lr * (args.min_lr_frac + (1 - args.min_lr_frac) * cosine)
 
     # Resume if a checkpoint exists.
     start_step = 0
@@ -231,28 +242,38 @@ def main():
     )
     print(f"val set: {len(val_texts)} lines")
 
+    eff_batch = args.batch_size * args.accum_steps
+    print(f"micro-batch={args.batch_size} accum={args.accum_steps} "
+          f"effective batch={eff_batch}")
+
     model.train()
     running = 0.0
     for step in range(start_step + 1, args.steps + 1):
         for g in optim.param_groups:
             g["lr"] = lr_at(step)
 
-        batch = collator(stream.batch(args.batch_size))
-        input_ids = batch["input_ids"].to(device)
-        labels = batch["labels"].to(device)
-
-        if use_bf16:
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                _, loss = model(input_ids, labels=labels)
-        else:
-            _, loss = model(input_ids, labels=labels)
-
         optim.zero_grad()
-        loss.backward()
+        step_loss = 0.0
+        # Accumulate gradients over accum_steps micro-batches before stepping.
+        for _ in range(args.accum_steps):
+            batch = collator(stream.batch(args.batch_size))
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+
+            if use_bf16:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    _, loss = model(input_ids, labels=labels)
+            else:
+                _, loss = model(input_ids, labels=labels)
+
+            # Scale so the summed gradient equals the mean over the effective batch.
+            (loss / args.accum_steps).backward()
+            step_loss += loss.item() / args.accum_steps
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optim.step()
 
-        running += loss.item()
+        running += step_loss
         if step % args.log_every == 0:
             print(f"step {step:6d} | loss {running/args.log_every:.4f} "
                   f"| lr {lr_at(step):.2e}")
